@@ -1,0 +1,163 @@
+Enum SourceTimeframe {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  IRREGULAR
+}
+
+Table extraction_methods {
+  extraction_method_name varchar [pk]
+  source_name varchar
+  extraction_type varchar
+  access_url varchar
+  notes varchar
+  active boolean [default: true]
+}
+
+Table indicator_category {
+  indicator_name varchar
+  risk_category varchar
+  driver_category varchar
+
+  indexes {
+    (indicator_name, risk_category, driver_category) [pk]
+    indicator_name
+    risk_category
+    driver_category
+  }
+}
+
+Table raw_data {
+  indicator_name varchar
+  region_name varchar
+  observation_date date
+  source_timeframe SourceTimeframe
+  source_from_date date
+  source_to_date date
+  update_datetime datetime
+  value float
+  extraction_method_name varchar
+  is_carry_forward boolean [default: false]
+  notes varchar
+
+  indexes {
+    (indicator_name, region_name, observation_date, source_timeframe, source_from_date, source_to_date) [pk]
+    (region_name, observation_date)
+    update_datetime
+  }
+}
+
+Table computed_values {
+  observation_date date
+  region_name varchar
+  indicator_name varchar
+  risk_category varchar
+  driver_category varchar
+  score float
+  z_score float
+  update_datetime datetime
+
+  indexes {
+    (observation_date, region_name, indicator_name, risk_category, driver_category) [pk]
+    (region_name, observation_date)
+    (risk_category, observation_date)
+    (driver_category, observation_date)
+    update_datetime
+  }
+}
+
+Table events {
+  event_name varchar [pk]
+  event_date date
+  event_type varchar
+  description varchar
+  active boolean [default: true]
+}
+
+Table raw_news_articles {
+  article_url varchar [pk]
+  source_name varchar
+  headline varchar
+  summary varchar
+  published_datetime datetime
+  extraction_method_name varchar
+  is_selected boolean [default: false]
+  update_datetime datetime
+  notes varchar
+
+  indexes {
+    published_datetime
+  }
+}
+
+Table selected_news_articles {
+  article_url varchar [pk]
+  event_name varchar
+  relevance_score float
+  selection_reason varchar
+  update_datetime datetime
+
+  indexes {
+    (event_name, update_datetime)
+  }
+}
+
+Table stocks {
+  stock_ticker varchar [pk]
+  company_name varchar
+  sector_name varchar
+  industry_name varchar
+  active boolean [default: true]
+}
+
+Table event_region_impact {
+  event_name varchar
+  region_name varchar
+  impact_score float
+  impact_channel varchar
+  notes varchar
+
+  indexes {
+    (event_name, region_name) [pk]
+    region_name
+  }
+}
+
+Table event_stock_impact {
+  event_name varchar
+  stock_ticker varchar
+  impact_score float
+  impact_direction varchar
+  impact_channel varchar
+  notes varchar
+
+  indexes {
+    (event_name, stock_ticker) [pk]
+    stock_ticker
+    impact_channel
+  }
+}
+
+Table event_driver_impact {
+  event_name varchar
+  driver_category varchar
+  impact_score float
+  impact_direction varchar
+  notes varchar
+
+  indexes {
+    (event_name, driver_category) [pk]
+    driver_category
+  }
+}
+
+Ref: raw_data.extraction_method_name > extraction_methods.extraction_method_name
+Ref: raw_news_articles.extraction_method_name > extraction_methods.extraction_method_name
+Ref: selected_news_articles.article_url > raw_news_articles.article_url
+Ref: selected_news_articles.event_name > events.event_name
+Ref: event_region_impact.event_name > events.event_name
+Ref: event_stock_impact.event_name > events.event_name
+Ref: event_stock_impact.stock_ticker > stocks.stock_ticker
+Ref: event_driver_impact.event_name > events.event_name

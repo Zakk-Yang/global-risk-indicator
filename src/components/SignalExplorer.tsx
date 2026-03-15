@@ -25,6 +25,14 @@ interface Props {
   regions: Region[];
 }
 
+function SortIcon({ active, dir }: { active: boolean; dir: "asc" | "desc" }) {
+  return (
+    <span className={`ml-0.5 text-[9px] ${active ? "text-zinc-100" : "text-zinc-500"}`}>
+      {active ? (dir === "desc" ? "▼" : "▲") : "⇕"}
+    </span>
+  );
+}
+
 export default function SignalExplorer({ indicators, riskCategories, regions }: Props) {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"score" | "zScore" | "name">("score");
@@ -90,12 +98,6 @@ export default function SignalExplorer({ indicators, riskCategories, regions }: 
     if (sortKey === key) setSortDir(sortDir === "desc" ? "asc" : "desc");
     else { setSortKey(key); setSortDir("desc"); }
   };
-
-  const SortIcon = ({ active, dir }: { active: boolean; dir: string }) => (
-    <span className={`ml-0.5 text-[9px] ${active ? "text-zinc-100" : "text-zinc-500"}`}>
-      {active ? (dir === "desc" ? "▼" : "▲") : "⇕"}
-    </span>
-  );
 
   return (
     <div>

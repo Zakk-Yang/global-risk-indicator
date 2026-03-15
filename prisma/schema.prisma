@@ -13,9 +13,53 @@ datasource db {
   provider = "postgresql"
 }
 
+enum Frequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  SEMIANNUAL
+  ANNUAL
+  IRREGULAR
+}
+
+enum RegionType {
+  COUNTRY
+  REGION
+  BASKET
+  GLOBAL
+}
+
+enum ProviderAccessType {
+  PUBLIC
+  API_KEY
+  ACCOUNT
+  LICENSED
+}
+
+enum CoverageStatus {
+  OBSERVED
+  CARRY_FORWARD
+  ESTIMATED
+  STALE
+}
+
 // =============================================================================
 // Reference Tables (static config, populated via seed)
 // =============================================================================
+
+model Provider {
+  id           String             @id // e.g. "fred"
+  name         String // "FRED"
+  accessType   ProviderAccessType @default(PUBLIC) @map("access_type")
+  docsUrl      String             @default("") @map("docs_url")
+  baseUrl      String             @default("") @map("base_url")
+  active       Boolean            @default(true)
+
+  series              IndicatorSeries[]
+
+  @@map("providers")
+}
 
 model Driver {
   id          String @id // e.g. "geopolitical"
@@ -44,10 +88,11 @@ model Indicator {
   id         String       @id // e.g. "cpi"
   name       String // "CPI Inflation (YoY)"
   unit       String // "%", "idx"
+  description String       @default("")
   categoryId String       @map("category_id")
   category   RiskCategory @relation(fields: [categoryId], references: [id])
 
-  // Data source metadata
+  // Legacy/default metadata. Real production sourcing should use IndicatorSeries.
   frequency   String   @default("monthly") // "daily" | "weekly" | "monthly" | "quarterly"
   source      String   @default("") // "FRED", "OECD", "BIS", "GDELT", etc.
   sourceCode  String   @default("") @map("source_code") // API series ID (e.g. "CPIAUCSL" for FRED)
@@ -56,6 +101,7 @@ model Indicator {
   nextExpected DateTime? @map("next_expected") // When next release is expected
 
   readings Reading[]
+  series   IndicatorSeries[]
 
   @@map("indicators")
 }
@@ -64,11 +110,67 @@ model Region {
   id   String @id // e.g. "us"
   name String // "United States"
   code String // "US"
+  type RegionType @default(REGION)
+  iso2 String?
+  iso3 String?
+  active Boolean @default(true)
 
   readings       Reading[]
   snapshotScores SnapshotRegionScore[]
+  series         IndicatorSeries[]
+  memberOf       RegionMembership[] @relation("RegionMembershipChild")
+  members        RegionMembership[] @relation("RegionMembershipParent")
 
   @@map("regions")
+}
+
+model RegionMembership {
+  parentRegionId String @map("parent_region_id")
+  childRegionId  String @map("child_region_id")
+  weight         Float?
+
+  parent Region @relation("RegionMembershipParent", fields: [parentRegionId], references: [id], onDelete: Cascade)
+  child  Region @relation("RegionMembershipChild", fields: [childRegionId], references: [id], onDelete: Cascade)
+
+  @@id([parentRegionId, childRegionId])
+  @@map("region_memberships")
+}
+
+/// Provider-specific mapping for one indicator in one region.
+/// Use this when a source series differs by geography/provider; indicator-level metadata remains as the fallback/default.
+model IndicatorSeries {
+  id          String    @id @default(cuid())
+  indicatorId String    @map("indicator_id")
+  regionId    String    @map("region_id")
+  providerId  String    @map("provider_id")
+  dataset     String    @default("")
+  seriesCode  String    @map("series_code")
+  seriesLabel String?   @map("series_label")
+  frequency   Frequency
+  unit        String    @default("")
+  sourceUrl   String?   @map("source_url")
+  transform   String    @default("level") // "level", "yoy", "mom", "drawdown", etc.
+  isPrimary   Boolean   @default(true) @map("is_primary")
+  staleAfterHours Int?  @map("stale_after_hours")
+  lastUpdated   DateTime? @map("last_updated")
+  nextExpected  DateTime? @map("next_expected")
+  minValue       Float?   @map("min_value")
+  maxValue       Float?   @map("max_value")
+  safeCenter     Float?   @map("safe_center")
+  historicalMean Float?   @map("historical_mean")
+  historicalStdDev Float? @map("historical_std_dev")
+  inverted       Boolean?
+  symmetric      Boolean?
+
+  indicator Indicator @relation(fields: [indicatorId], references: [id])
+  region    Region    @relation(fields: [regionId], references: [id])
+  provider  Provider  @relation(fields: [providerId], references: [id])
+
+  readings     Reading[]
+
+  @@unique([indicatorId, regionId, providerId, seriesCode])
+  @@index([indicatorId, regionId, isPrimary])
+  @@map("indicator_series")
 }
 
 /// Driver-to-Category weight (the contribution matrix)
@@ -88,24 +190,31 @@ model DriverCategory {
 // Time-Series Data (grows with each data refresh)
 // =============================================================================
 
-/// Raw indicator reading per region per date — the core data table
+/// Canonical derived indicator reading per dashboard region/date.
 model Reading {
   id          Int      @id @default(autoincrement())
   indicatorId String   @map("indicator_id")
   regionId    String   @map("region_id")
+  seriesId    String?  @map("series_id")
   date        DateTime @db.Date
+  sourceUpdatedAt DateTime? @map("source_updated_at")
 
   value  Float // Raw value (e.g. 3.8 for CPI)
   score  Int // Normalized risk score 0-100
   zScore Float   @map("z_score") // Z-score vs historical mean
   trend  String // "rising" | "falling" | "stable"
+  coverageStatus CoverageStatus @default(OBSERVED) @map("coverage_status")
+  isCarryForward Boolean @default(false) @map("is_carry_forward")
+  stalenessHours Int? @map("staleness_hours")
 
   indicator Indicator @relation(fields: [indicatorId], references: [id])
   region    Region    @relation(fields: [regionId], references: [id])
+  series    IndicatorSeries? @relation(fields: [seriesId], references: [id])
 
   @@unique([indicatorId, regionId, date])
   @@index([date])
   @@index([indicatorId, regionId, date(sort: Desc)]) // Latest reading per indicator/region
+  @@index([seriesId, date(sort: Desc)])
   @@map("readings")
 }
 

@@ -15,6 +15,17 @@ import type {
 // Dashboard data fetchers — return shapes matching existing component props
 // =============================================================================
 
+/** Compute percentile rank of a GRI score against all historical snapshots */
+async function computePercentile(griScore: number): Promise<number> {
+  const allScores = await prisma.snapshot.findMany({
+    select: { griScore: true },
+    orderBy: { griScore: "asc" },
+  });
+  if (allScores.length === 0) return 50;
+  const belowOrEqual = allScores.filter((s) => s.griScore <= griScore).length;
+  return Math.round((belowOrEqual / allScores.length) * 100);
+}
+
 /** Get the latest snapshot (today's GRI score + regime) */
 export async function getLatestSnapshot() {
   const snap = await prisma.snapshot.findFirst({
@@ -31,7 +42,7 @@ export async function getLatestSnapshot() {
     previous: snap.griScore - snap.griDelta,
     delta: snap.griDelta,
     regime: snap.regime,
-    percentile: 78, // TODO: compute from historical distribution
+    percentile: await computePercentile(snap.griScore),
     updatedAt: snap.date.toISOString(),
   };
 }
@@ -84,7 +95,13 @@ export async function getRiskCategories(): Promise<RiskCategory[]> {
 
 /** Get all regions with current scores */
 export async function getRegions(): Promise<Region[]> {
-  const allRegions = await prisma.region.findMany();
+  const allRegions = await prisma.region.findMany({
+    select: {
+      id: true,
+      name: true,
+      code: true,
+    },
+  });
   const latestSnap = await prisma.snapshot.findFirst({ orderBy: { date: "desc" } });
   const regionScores = latestSnap
     ? await prisma.snapshotRegionScore.findMany({ where: { snapshotId: latestSnap.id } })
@@ -95,7 +112,12 @@ export async function getRegions(): Promise<Region[]> {
   const readings = await prisma.reading.findMany({
     distinct: ["indicatorId", "regionId"],
     orderBy: { date: "desc" },
-    include: { indicator: { select: { categoryId: true } } },
+    select: {
+      indicatorId: true,
+      regionId: true,
+      score: true,
+      indicator: { select: { categoryId: true } },
+    },
   });
 
   // Group readings by region → category → avg score
@@ -134,12 +156,27 @@ export async function getRegions(): Promise<Region[]> {
 
 /** Get all indicators with their latest region readings (carry-forward) */
 export async function getIndicators(): Promise<Indicator[]> {
-  const allIndicators = await prisma.indicator.findMany();
+  const allIndicators = await prisma.indicator.findMany({
+    select: {
+      id: true,
+      name: true,
+      unit: true,
+      categoryId: true,
+    },
+  });
 
   // Carry-forward: get the most recent reading per indicator/region pair
   const readings = await prisma.reading.findMany({
     distinct: ["indicatorId", "regionId"],
     orderBy: { date: "desc" },
+    select: {
+      indicatorId: true,
+      regionId: true,
+      value: true,
+      score: true,
+      zScore: true,
+      trend: true,
+    },
   });
 
   // Group readings by indicator

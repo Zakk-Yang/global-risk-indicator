@@ -1,19 +1,20 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0a0a0f;
-  --foreground: #e4e4e7;
-  --card: #111118;
-  --card-border: #1e1e2a;
-  --card-hover: #16161f;
-  --muted: #d4d4d8;
-  --accent: #3b82f6;
+  --background: #07111c;
+  --foreground: #f5f7fb;
+  --card: rgba(8, 19, 33, 0.84);
+  --card-border: rgba(147, 197, 253, 0.12);
+  --card-hover: rgba(10, 26, 45, 0.94);
+  --muted: #9fb2c8;
+  --accent: #5eead4;
   --risk-low: #22c55e;
   --risk-mid: #f59e0b;
   --risk-high: #ef4444;
   --risk-critical: #dc2626;
-  --glow-blue: rgba(59, 130, 246, 0.15);
-  --glow-amber: rgba(245, 158, 11, 0.15);
+  --glow-cyan: rgba(94, 234, 212, 0.18);
+  --glow-blue: rgba(56, 189, 248, 0.16);
+  --glow-amber: rgba(245, 158, 11, 0.14);
   --glow-red: rgba(239, 68, 68, 0.15);
 }
 
@@ -30,12 +31,37 @@
   --color-risk-high: var(--risk-high);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-space-grotesk);
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
-  background: var(--background);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(94, 234, 212, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.14), transparent 32%),
+    radial-gradient(circle at 50% 120%, rgba(245, 158, 11, 0.12), transparent 35%),
+    linear-gradient(180deg, #08111d 0%, #06111d 52%, #050b14 100%);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, sans-serif;
+  letter-spacing: -0.01em;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+  background-size: 80px 80px;
+  mask-image: radial-gradient(circle at center, black 22%, transparent 82%);
+  opacity: 0.45;
+  z-index: -1;
 }
 
 /* Custom scrollbar */
@@ -54,10 +80,32 @@ body {
   background: #3f3f46;
 }
 
-/* Glow effects */
-.glow-blue { box-shadow: 0 0 20px var(--glow-blue), inset 0 0 20px var(--glow-blue); }
-.glow-amber { box-shadow: 0 0 20px var(--glow-amber), inset 0 0 20px var(--glow-amber); }
-.glow-red { box-shadow: 0 0 20px var(--glow-red), inset 0 0 20px var(--glow-red); }
+::selection {
+  background: rgba(94, 234, 212, 0.25);
+  color: #f8fafc;
+}
+
+.font-display {
+  font-family: var(--font-display), var(--font-sans), sans-serif;
+}
+
+.eyebrow {
+  color: rgba(191, 219, 254, 0.78);
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+.metric-tile {
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.72), rgba(8, 15, 25, 0.88));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 50px rgba(2, 8, 23, 0.35);
+}
 
 /* Pulse animation for score */
 @keyframes pulse-glow {
@@ -76,9 +124,9 @@ body {
 /* Recharts customization */
 .recharts-cartesian-grid-horizontal line,
 .recharts-cartesian-grid-vertical line {
-  stroke: #1e1e2a;
+  stroke: rgba(148, 163, 184, 0.14);
 }
 .recharts-text {
-  fill: #d4d4d8;
+  fill: #a8bad0;
   font-size: 11px;
 }

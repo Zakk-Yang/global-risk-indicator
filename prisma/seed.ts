@@ -1,11 +1,44 @@
 import { PrismaClient } from "../src/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import {
+  INDICATOR_CONFIGS,
+  normalizeReading,
+  computeTrend,
+  computeSnapshot,
+  type ScoredReading,
+  type Snapshot,
+  type WeightMatrix,
+} from "../src/lib/scoring";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
 const prisma = new PrismaClient({ adapter });
 
 // =============================================================================
-// Reference Data — mirrors src/lib/mock-data.ts definitions
+// Deterministic PRNG — mulberry32
+// =============================================================================
+
+function mulberry32(seed: number) {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const rand = mulberry32(42);
+
+/** Box-Muller transform for gaussian random numbers */
+function gaussian(): number {
+  let u1 = 0, u2 = 0;
+  while (u1 === 0) u1 = rand();
+  while (u2 === 0) u2 = rand();
+  return Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+}
+
+// =============================================================================
+// Reference Data — mirrors existing seed definitions
 // =============================================================================
 
 const drivers = [
@@ -25,70 +58,59 @@ const riskCategories = [
 ];
 
 const regions = [
-  { id: "us", name: "United States", code: "US" },
-  { id: "europe", name: "Europe", code: "EU" },
-  { id: "china", name: "China", code: "CN" },
-  { id: "em", name: "Emerging Markets", code: "EM" },
-  { id: "japan", name: "Japan", code: "JP" },
-  { id: "mideast", name: "Middle East", code: "ME" },
+  { id: "us", name: "United States", code: "US", type: "COUNTRY", iso2: "US", iso3: "USA" },
+  { id: "europe", name: "Europe", code: "EU", type: "REGION", iso2: null, iso3: null },
+  { id: "china", name: "China", code: "CN", type: "COUNTRY", iso2: "CN", iso3: "CHN" },
+  { id: "em", name: "Emerging Markets", code: "EM", type: "BASKET", iso2: null, iso3: null },
+  { id: "japan", name: "Japan", code: "JP", type: "COUNTRY", iso2: "JP", iso3: "JPN" },
+  { id: "mideast", name: "Middle East", code: "ME", type: "REGION", iso2: null, iso3: null },
 ];
 
-const indicators = [
-  // Inflation Pressure
+const indicatorDefs = [
   { id: "cpi", name: "CPI Inflation (YoY)", unit: "%", categoryId: "inflation", frequency: "monthly", source: "FRED", sourceCode: "CPIAUCSL", sourceUrl: "https://fred.stlouisfed.org/series/CPIAUCSL" },
   { id: "energy-price", name: "Energy Price Index", unit: "idx", categoryId: "inflation", frequency: "daily", source: "FRED", sourceCode: "DCOILWTICO", sourceUrl: "https://fred.stlouisfed.org/series/DCOILWTICO" },
   { id: "food-price", name: "Food Price Index", unit: "idx", categoryId: "inflation", frequency: "monthly", source: "FAO", sourceCode: "FFPI", sourceUrl: "https://www.fao.org/worldfoodsituation/foodpricesindex" },
   { id: "wage-growth", name: "Wage Growth (YoY)", unit: "%", categoryId: "inflation", frequency: "monthly", source: "FRED", sourceCode: "CES0500000003", sourceUrl: "https://fred.stlouisfed.org/series/CES0500000003" },
-  // Credit & Liquidity Stress
   { id: "credit-growth", name: "Credit Growth (YoY)", unit: "%", categoryId: "credit-liquidity", frequency: "quarterly", source: "BIS", sourceCode: "TOTAL_CREDIT", sourceUrl: "https://www.bis.org/statistics/totcredit.htm" },
   { id: "house-price", name: "House Price Index (YoY)", unit: "%", categoryId: "credit-liquidity", frequency: "quarterly", source: "BIS", sourceCode: "REAL_PROPERTY", sourceUrl: "https://www.bis.org/statistics/pp.htm" },
   { id: "bond-yield-10y", name: "10Y Government Bond Yield", unit: "%", categoryId: "credit-liquidity", frequency: "daily", source: "FRED", sourceCode: "DGS10", sourceUrl: "https://fred.stlouisfed.org/series/DGS10" },
   { id: "govt-debt-gdp", name: "Government Debt / GDP", unit: "%", categoryId: "credit-liquidity", frequency: "quarterly", source: "IMF", sourceCode: "GGGD_NGDP", sourceUrl: "https://www.imf.org/external/datamapper/GGGD_NGDP@WEO" },
   { id: "policy-rate", name: "Policy Interest Rate", unit: "%", categoryId: "credit-liquidity", frequency: "monthly", source: "BIS", sourceCode: "POLICY_RATE", sourceUrl: "https://www.bis.org/statistics/cbpol.htm" },
-  // Macro Slowdown
   { id: "gdp-growth", name: "GDP Growth (YoY)", unit: "%", categoryId: "macro-slowdown", frequency: "quarterly", source: "OECD", sourceCode: "QNA_GDP", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=QNA" },
   { id: "pmi-manufacturing", name: "PMI Manufacturing", unit: "idx", categoryId: "macro-slowdown", frequency: "monthly", source: "S&P Global", sourceCode: "PMI_MFG", sourceUrl: "https://www.pmi.spglobal.com" },
   { id: "industrial-production", name: "Industrial Production (YoY)", unit: "%", categoryId: "macro-slowdown", frequency: "monthly", source: "FRED", sourceCode: "INDPRO", sourceUrl: "https://fred.stlouisfed.org/series/INDPRO" },
   { id: "trade-balance", name: "Trade Balance (% GDP)", unit: "%", categoryId: "macro-slowdown", frequency: "quarterly", source: "OECD", sourceCode: "TRADE_BAL", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=MEI_TRD" },
   { id: "business-confidence", name: "Business Confidence Index", unit: "idx", categoryId: "macro-slowdown", frequency: "monthly", source: "OECD", sourceCode: "BCI", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=MEI_CLI" },
-  // Labor & Consumption Stress
   { id: "unemployment", name: "Unemployment Rate", unit: "%", categoryId: "labor-consumption", frequency: "monthly", source: "FRED", sourceCode: "UNRATE", sourceUrl: "https://fred.stlouisfed.org/series/UNRATE" },
   { id: "consumer-confidence", name: "Consumer Confidence Index", unit: "idx", categoryId: "labor-consumption", frequency: "monthly", source: "OECD", sourceCode: "CCI", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=MEI_CLI" },
   { id: "retail-sales", name: "Retail Sales (YoY)", unit: "%", categoryId: "labor-consumption", frequency: "monthly", source: "FRED", sourceCode: "RSXFS", sourceUrl: "https://fred.stlouisfed.org/series/RSXFS" },
-  // Financial Market Stress
   { id: "stock-market", name: "Stock Market Drawdown", unit: "%", categoryId: "financial-market", frequency: "daily", source: "Yahoo Finance", sourceCode: "^GSPC", sourceUrl: "https://finance.yahoo.com/quote/%5EGSPC" },
   { id: "exchange-rate", name: "Exchange Rate vs USD (YoY)", unit: "%", categoryId: "financial-market", frequency: "daily", source: "FRED", sourceCode: "DTWEXBGS", sourceUrl: "https://fred.stlouisfed.org/series/DTWEXBGS" },
   { id: "foreign-reserves", name: "Foreign Reserves (3m change)", unit: "%", categoryId: "financial-market", frequency: "monthly", source: "IMF", sourceCode: "COFER", sourceUrl: "https://data.imf.org/?sk=E6A5F467-C14B-4AA8-9F6D-5A09EC4E62A4" },
   { id: "current-account", name: "Current Account (% GDP)", unit: "%", categoryId: "financial-market", frequency: "quarterly", source: "IMF", sourceCode: "BCA_NGDPD", sourceUrl: "https://www.imf.org/external/datamapper/BCA_NGDPD@WEO" },
 ];
 
-// Driver → Category contribution weights (from categoryMatrix)
-const driverCategoryWeights = [
-  // Geopolitical Conflict
+const driverCategoryWeights: WeightMatrix = [
   { driverId: "geopolitical", categoryId: "inflation", weight: 68 },
   { driverId: "geopolitical", categoryId: "credit-liquidity", weight: 32 },
   { driverId: "geopolitical", categoryId: "macro-slowdown", weight: 62 },
   { driverId: "geopolitical", categoryId: "labor-consumption", weight: 28 },
   { driverId: "geopolitical", categoryId: "financial-market", weight: 72 },
-  // AI / Tech Disruption
   { driverId: "ai-disruption", categoryId: "inflation", weight: 25 },
   { driverId: "ai-disruption", categoryId: "credit-liquidity", weight: 35 },
   { driverId: "ai-disruption", categoryId: "macro-slowdown", weight: 30 },
   { driverId: "ai-disruption", categoryId: "labor-consumption", weight: 75 },
   { driverId: "ai-disruption", categoryId: "financial-market", weight: 68 },
-  // Energy Supply Shock
   { driverId: "energy-shock", categoryId: "inflation", weight: 78 },
   { driverId: "energy-shock", categoryId: "credit-liquidity", weight: 28 },
   { driverId: "energy-shock", categoryId: "macro-slowdown", weight: 58 },
   { driverId: "energy-shock", categoryId: "labor-consumption", weight: 22 },
   { driverId: "energy-shock", categoryId: "financial-market", weight: 55 },
-  // Monetary Tightening
   { driverId: "monetary", categoryId: "inflation", weight: 52 },
   { driverId: "monetary", categoryId: "credit-liquidity", weight: 75 },
   { driverId: "monetary", categoryId: "macro-slowdown", weight: 38 },
   { driverId: "monetary", categoryId: "labor-consumption", weight: 30 },
   { driverId: "monetary", categoryId: "financial-market", weight: 62 },
-  // Financial Risks
   { driverId: "financial-risks", categoryId: "inflation", weight: 35 },
   { driverId: "financial-risks", categoryId: "credit-liquidity", weight: 72 },
   { driverId: "financial-risks", categoryId: "macro-slowdown", weight: 58 },
@@ -96,176 +118,305 @@ const driverCategoryWeights = [
   { driverId: "financial-risks", categoryId: "financial-market", weight: 65 },
 ];
 
-// Mock readings for today (from mock-data.ts indicator values)
-const today = new Date("2026-03-14");
+// =============================================================================
+// Region Base Values (April 2024 starting points — realistic per-region)
+// =============================================================================
 
-const mockReadings: { indicatorId: string; regionId: string; value: number; score: number; zScore: number; trend: string }[] = [
-  // CPI
-  { indicatorId: "cpi", regionId: "us", value: 3.8, score: 62, zScore: 1.5, trend: "rising" },
-  { indicatorId: "cpi", regionId: "europe", value: 4.2, score: 68, zScore: 1.8, trend: "rising" },
-  { indicatorId: "cpi", regionId: "china", value: 0.8, score: 25, zScore: -0.8, trend: "falling" },
-  { indicatorId: "cpi", regionId: "em", value: 6.5, score: 72, zScore: 2.0, trend: "stable" },
-  { indicatorId: "cpi", regionId: "japan", value: 2.8, score: 48, zScore: 0.6, trend: "rising" },
-  { indicatorId: "cpi", regionId: "mideast", value: 5.1, score: 65, zScore: 1.6, trend: "rising" },
-  // Energy Price
-  { indicatorId: "energy-price", regionId: "us", value: 112, score: 58, zScore: 1.2, trend: "rising" },
-  { indicatorId: "energy-price", regionId: "europe", value: 148, score: 78, zScore: 2.4, trend: "rising" },
-  { indicatorId: "energy-price", regionId: "china", value: 105, score: 48, zScore: 0.5, trend: "stable" },
-  { indicatorId: "energy-price", regionId: "em", value: 125, score: 65, zScore: 1.6, trend: "rising" },
-  { indicatorId: "energy-price", regionId: "japan", value: 132, score: 68, zScore: 1.8, trend: "rising" },
-  { indicatorId: "energy-price", regionId: "mideast", value: 95, score: 42, zScore: 0.2, trend: "stable" },
-  // Food Price
-  { indicatorId: "food-price", regionId: "us", value: 108, score: 52, zScore: 0.8, trend: "stable" },
-  { indicatorId: "food-price", regionId: "europe", value: 115, score: 62, zScore: 1.4, trend: "rising" },
-  { indicatorId: "food-price", regionId: "china", value: 102, score: 38, zScore: 0.1, trend: "falling" },
-  { indicatorId: "food-price", regionId: "em", value: 128, score: 72, zScore: 2.1, trend: "rising" },
-  { indicatorId: "food-price", regionId: "japan", value: 110, score: 55, zScore: 0.9, trend: "stable" },
-  { indicatorId: "food-price", regionId: "mideast", value: 122, score: 68, zScore: 1.7, trend: "rising" },
-  // Wage Growth
-  { indicatorId: "wage-growth", regionId: "us", value: 4.2, score: 58, zScore: 1.2, trend: "stable" },
-  { indicatorId: "wage-growth", regionId: "europe", value: 3.8, score: 52, zScore: 0.8, trend: "rising" },
-  { indicatorId: "wage-growth", regionId: "china", value: 5.1, score: 45, zScore: 0.4, trend: "falling" },
-  { indicatorId: "wage-growth", regionId: "em", value: 6.8, score: 55, zScore: 1.0, trend: "stable" },
-  { indicatorId: "wage-growth", regionId: "japan", value: 2.5, score: 42, zScore: 0.3, trend: "rising" },
-  { indicatorId: "wage-growth", regionId: "mideast", value: 3.2, score: 40, zScore: 0.1, trend: "stable" },
-  // Credit Growth
-  { indicatorId: "credit-growth", regionId: "us", value: 3.2, score: 55, zScore: 0.9, trend: "stable" },
-  { indicatorId: "credit-growth", regionId: "europe", value: 1.8, score: 48, zScore: 0.5, trend: "falling" },
-  { indicatorId: "credit-growth", regionId: "china", value: 9.5, score: 75, zScore: 2.3, trend: "rising" },
-  { indicatorId: "credit-growth", regionId: "em", value: 5.8, score: 58, zScore: 1.2, trend: "stable" },
-  { indicatorId: "credit-growth", regionId: "japan", value: 2.1, score: 42, zScore: 0.2, trend: "stable" },
-  { indicatorId: "credit-growth", regionId: "mideast", value: 4.5, score: 52, zScore: 0.7, trend: "rising" },
-  // House Price
-  { indicatorId: "house-price", regionId: "us", value: 5.8, score: 62, zScore: 1.4, trend: "rising" },
-  { indicatorId: "house-price", regionId: "europe", value: 2.1, score: 45, zScore: 0.3, trend: "falling" },
-  { indicatorId: "house-price", regionId: "china", value: -3.2, score: 68, zScore: -1.8, trend: "falling" },
-  { indicatorId: "house-price", regionId: "em", value: 4.2, score: 52, zScore: 0.7, trend: "stable" },
-  { indicatorId: "house-price", regionId: "japan", value: 6.5, score: 58, zScore: 1.2, trend: "rising" },
-  { indicatorId: "house-price", regionId: "mideast", value: 8.2, score: 65, zScore: 1.6, trend: "rising" },
-  // Bond Yield 10Y
-  { indicatorId: "bond-yield-10y", regionId: "us", value: 4.65, score: 68, zScore: 1.8, trend: "rising" },
-  { indicatorId: "bond-yield-10y", regionId: "europe", value: 2.85, score: 62, zScore: 1.4, trend: "rising" },
-  { indicatorId: "bond-yield-10y", regionId: "china", value: 2.35, score: 35, zScore: -0.3, trend: "falling" },
-  { indicatorId: "bond-yield-10y", regionId: "em", value: 7.20, score: 65, zScore: 1.6, trend: "stable" },
-  { indicatorId: "bond-yield-10y", regionId: "japan", value: 1.15, score: 55, zScore: 1.0, trend: "rising" },
-  { indicatorId: "bond-yield-10y", regionId: "mideast", value: 5.10, score: 58, zScore: 1.2, trend: "stable" },
-  // Govt Debt/GDP
-  { indicatorId: "govt-debt-gdp", regionId: "us", value: 124, score: 72, zScore: 2.1, trend: "rising" },
-  { indicatorId: "govt-debt-gdp", regionId: "europe", value: 88, score: 58, zScore: 1.1, trend: "stable" },
-  { indicatorId: "govt-debt-gdp", regionId: "china", value: 82, score: 62, zScore: 1.4, trend: "rising" },
-  { indicatorId: "govt-debt-gdp", regionId: "em", value: 58, score: 45, zScore: 0.3, trend: "stable" },
-  { indicatorId: "govt-debt-gdp", regionId: "japan", value: 255, score: 78, zScore: 2.5, trend: "rising" },
-  { indicatorId: "govt-debt-gdp", regionId: "mideast", value: 42, score: 32, zScore: -0.4, trend: "falling" },
-  // Policy Rate
-  { indicatorId: "policy-rate", regionId: "us", value: 5.25, score: 68, zScore: 1.8, trend: "stable" },
-  { indicatorId: "policy-rate", regionId: "europe", value: 4.00, score: 65, zScore: 1.6, trend: "stable" },
-  { indicatorId: "policy-rate", regionId: "china", value: 3.45, score: 38, zScore: -0.1, trend: "falling" },
-  { indicatorId: "policy-rate", regionId: "em", value: 8.50, score: 62, zScore: 1.3, trend: "falling" },
-  { indicatorId: "policy-rate", regionId: "japan", value: 0.25, score: 35, zScore: 0.8, trend: "rising" },
-  { indicatorId: "policy-rate", regionId: "mideast", value: 5.50, score: 60, zScore: 1.3, trend: "stable" },
-  // GDP Growth
-  { indicatorId: "gdp-growth", regionId: "us", value: 2.1, score: 48, zScore: -0.5, trend: "falling" },
-  { indicatorId: "gdp-growth", regionId: "europe", value: 0.6, score: 68, zScore: -1.8, trend: "falling" },
-  { indicatorId: "gdp-growth", regionId: "china", value: 4.2, score: 62, zScore: -1.4, trend: "falling" },
-  { indicatorId: "gdp-growth", regionId: "em", value: 3.5, score: 52, zScore: -0.7, trend: "stable" },
-  { indicatorId: "gdp-growth", regionId: "japan", value: 0.8, score: 58, zScore: -1.2, trend: "falling" },
-  { indicatorId: "gdp-growth", regionId: "mideast", value: 2.8, score: 45, zScore: -0.3, trend: "stable" },
-  // PMI Manufacturing
-  { indicatorId: "pmi-manufacturing", regionId: "us", value: 48.5, score: 58, zScore: -1.1, trend: "falling" },
-  { indicatorId: "pmi-manufacturing", regionId: "europe", value: 45.2, score: 72, zScore: -2.0, trend: "falling" },
-  { indicatorId: "pmi-manufacturing", regionId: "china", value: 49.8, score: 52, zScore: -0.5, trend: "stable" },
-  { indicatorId: "pmi-manufacturing", regionId: "em", value: 50.5, score: 45, zScore: 0.1, trend: "stable" },
-  { indicatorId: "pmi-manufacturing", regionId: "japan", value: 47.8, score: 62, zScore: -1.4, trend: "falling" },
-  { indicatorId: "pmi-manufacturing", regionId: "mideast", value: 51.2, score: 42, zScore: 0.3, trend: "rising" },
-  // Industrial Production
-  { indicatorId: "industrial-production", regionId: "us", value: -0.5, score: 55, zScore: -0.9, trend: "falling" },
-  { indicatorId: "industrial-production", regionId: "europe", value: -2.1, score: 68, zScore: -1.8, trend: "falling" },
-  { indicatorId: "industrial-production", regionId: "china", value: 4.8, score: 42, zScore: 0.2, trend: "stable" },
-  { indicatorId: "industrial-production", regionId: "em", value: 2.2, score: 48, zScore: -0.4, trend: "stable" },
-  { indicatorId: "industrial-production", regionId: "japan", value: -1.2, score: 60, zScore: -1.3, trend: "falling" },
-  { indicatorId: "industrial-production", regionId: "mideast", value: 3.5, score: 38, zScore: 0.1, trend: "rising" },
-  // Trade Balance
-  { indicatorId: "trade-balance", regionId: "us", value: -3.2, score: 62, zScore: -1.4, trend: "falling" },
-  { indicatorId: "trade-balance", regionId: "europe", value: 1.8, score: 42, zScore: 0.2, trend: "stable" },
-  { indicatorId: "trade-balance", regionId: "china", value: 2.5, score: 38, zScore: 0.1, trend: "falling" },
-  { indicatorId: "trade-balance", regionId: "em", value: -1.5, score: 55, zScore: -0.9, trend: "falling" },
-  { indicatorId: "trade-balance", regionId: "japan", value: -0.8, score: 52, zScore: -0.7, trend: "stable" },
-  { indicatorId: "trade-balance", regionId: "mideast", value: 8.5, score: 35, zScore: 0.5, trend: "falling" },
-  // Business Confidence
-  { indicatorId: "business-confidence", regionId: "us", value: 97.5, score: 55, zScore: -0.9, trend: "falling" },
-  { indicatorId: "business-confidence", regionId: "europe", value: 94.2, score: 65, zScore: -1.6, trend: "falling" },
-  { indicatorId: "business-confidence", regionId: "china", value: 98.8, score: 48, zScore: -0.4, trend: "stable" },
-  { indicatorId: "business-confidence", regionId: "em", value: 99.5, score: 45, zScore: -0.2, trend: "stable" },
-  { indicatorId: "business-confidence", regionId: "japan", value: 96.1, score: 58, zScore: -1.1, trend: "falling" },
-  { indicatorId: "business-confidence", regionId: "mideast", value: 101.2, score: 40, zScore: 0.2, trend: "rising" },
-  // Unemployment
-  { indicatorId: "unemployment", regionId: "us", value: 4.2, score: 52, zScore: 0.7, trend: "rising" },
-  { indicatorId: "unemployment", regionId: "europe", value: 6.5, score: 58, zScore: 1.1, trend: "stable" },
-  { indicatorId: "unemployment", regionId: "china", value: 5.3, score: 55, zScore: 0.9, trend: "rising" },
-  { indicatorId: "unemployment", regionId: "em", value: 7.8, score: 52, zScore: 0.7, trend: "stable" },
-  { indicatorId: "unemployment", regionId: "japan", value: 2.6, score: 35, zScore: -0.3, trend: "stable" },
-  { indicatorId: "unemployment", regionId: "mideast", value: 9.5, score: 62, zScore: 1.4, trend: "stable" },
-  // Consumer Confidence
-  { indicatorId: "consumer-confidence", regionId: "us", value: 96.8, score: 55, zScore: -0.9, trend: "falling" },
-  { indicatorId: "consumer-confidence", regionId: "europe", value: 92.5, score: 65, zScore: -1.6, trend: "falling" },
-  { indicatorId: "consumer-confidence", regionId: "china", value: 94.2, score: 58, zScore: -1.2, trend: "falling" },
-  { indicatorId: "consumer-confidence", regionId: "em", value: 98.5, score: 48, zScore: -0.4, trend: "stable" },
-  { indicatorId: "consumer-confidence", regionId: "japan", value: 95.8, score: 52, zScore: -0.7, trend: "falling" },
-  { indicatorId: "consumer-confidence", regionId: "mideast", value: 90.2, score: 62, zScore: -1.4, trend: "falling" },
-  // Retail Sales
-  { indicatorId: "retail-sales", regionId: "us", value: 2.1, score: 48, zScore: -0.5, trend: "falling" },
-  { indicatorId: "retail-sales", regionId: "europe", value: 0.8, score: 58, zScore: -1.1, trend: "falling" },
-  { indicatorId: "retail-sales", regionId: "china", value: 3.5, score: 55, zScore: -0.9, trend: "falling" },
-  { indicatorId: "retail-sales", regionId: "em", value: 4.2, score: 42, zScore: 0.1, trend: "stable" },
-  { indicatorId: "retail-sales", regionId: "japan", value: 1.2, score: 52, zScore: -0.7, trend: "falling" },
-  { indicatorId: "retail-sales", regionId: "mideast", value: 2.8, score: 45, zScore: -0.3, trend: "stable" },
-  // Stock Market Drawdown
-  { indicatorId: "stock-market", regionId: "us", value: -8.5, score: 58, zScore: 1.2, trend: "falling" },
-  { indicatorId: "stock-market", regionId: "europe", value: -12.2, score: 68, zScore: 1.8, trend: "falling" },
-  { indicatorId: "stock-market", regionId: "china", value: -15.5, score: 72, zScore: 2.1, trend: "falling" },
-  { indicatorId: "stock-market", regionId: "em", value: -10.8, score: 62, zScore: 1.4, trend: "falling" },
-  { indicatorId: "stock-market", regionId: "japan", value: -6.2, score: 48, zScore: 0.5, trend: "stable" },
-  { indicatorId: "stock-market", regionId: "mideast", value: -18.5, score: 78, zScore: 2.5, trend: "falling" },
-  // Exchange Rate
-  { indicatorId: "exchange-rate", regionId: "us", value: 0, score: 30, zScore: 0, trend: "stable" },
-  { indicatorId: "exchange-rate", regionId: "europe", value: -5.2, score: 58, zScore: 1.2, trend: "falling" },
-  { indicatorId: "exchange-rate", regionId: "china", value: -3.8, score: 55, zScore: 0.9, trend: "falling" },
-  { indicatorId: "exchange-rate", regionId: "em", value: -8.5, score: 68, zScore: 1.8, trend: "falling" },
-  { indicatorId: "exchange-rate", regionId: "japan", value: -7.2, score: 62, zScore: 1.5, trend: "falling" },
-  { indicatorId: "exchange-rate", regionId: "mideast", value: -1.5, score: 38, zScore: 0.1, trend: "stable" },
-  // Foreign Reserves
-  { indicatorId: "foreign-reserves", regionId: "us", value: 0.2, score: 25, zScore: -0.2, trend: "stable" },
-  { indicatorId: "foreign-reserves", regionId: "europe", value: -1.5, score: 42, zScore: 0.3, trend: "falling" },
-  { indicatorId: "foreign-reserves", regionId: "china", value: -2.8, score: 58, zScore: 1.1, trend: "falling" },
-  { indicatorId: "foreign-reserves", regionId: "em", value: -4.5, score: 68, zScore: 1.8, trend: "falling" },
-  { indicatorId: "foreign-reserves", regionId: "japan", value: -1.2, score: 45, zScore: 0.4, trend: "falling" },
-  { indicatorId: "foreign-reserves", regionId: "mideast", value: -3.2, score: 55, zScore: 0.9, trend: "falling" },
-  // Current Account
-  { indicatorId: "current-account", regionId: "us", value: -3.5, score: 62, zScore: 1.4, trend: "falling" },
-  { indicatorId: "current-account", regionId: "europe", value: 2.1, score: 35, zScore: -0.2, trend: "stable" },
-  { indicatorId: "current-account", regionId: "china", value: 1.8, score: 38, zScore: 0.0, trend: "falling" },
-  { indicatorId: "current-account", regionId: "em", value: -2.2, score: 58, zScore: 1.1, trend: "falling" },
-  { indicatorId: "current-account", regionId: "japan", value: 3.5, score: 32, zScore: -0.4, trend: "stable" },
-  { indicatorId: "current-account", regionId: "mideast", value: 5.8, score: 28, zScore: -0.6, trend: "falling" },
+// base[indicatorId][regionId] = starting value for April 2024
+const BASE_VALUES: Record<string, Record<string, number>> = {
+  // Inflation Pressure
+  "cpi":                  { us: 3.1, europe: 2.8, china: 0.3,  em: 5.5,  japan: 2.2, mideast: 3.8 },
+  "energy-price":         { us: 95,  europe: 105, china: 90,   em: 100,  japan: 100, mideast: 80  },
+  "food-price":           { us: 100, europe: 102, china: 98,   em: 110,  japan: 101, mideast: 108 },
+  "wage-growth":          { us: 4.5, europe: 3.5, china: 5.5,  em: 6.0,  japan: 2.0, mideast: 3.0 },
+  // Credit & Liquidity
+  "credit-growth":        { us: 2.8, europe: 1.5, china: 8.0,  em: 5.0,  japan: 1.8, mideast: 3.5 },
+  "house-price":          { us: 4.5, europe: 2.8, china: -1.0, em: 3.5,  japan: 5.0, mideast: 6.0 },
+  "bond-yield-10y":       { us: 4.2, europe: 2.4, china: 2.5,  em: 6.5,  japan: 0.8, mideast: 4.5 },
+  "govt-debt-gdp":        { us: 120, europe: 85,  china: 78,   em: 55,   japan: 250, mideast: 40  },
+  "policy-rate":          { us: 5.25,europe: 4.0, china: 3.65, em: 9.0,  japan: 0.1, mideast: 5.5 },
+  // Macro Slowdown
+  "gdp-growth":           { us: 2.8, europe: 1.2, china: 5.2,  em: 4.0,  japan: 1.5, mideast: 3.5 },
+  "pmi-manufacturing":    { us: 51.0,europe: 48.5,china: 50.5, em: 51.5, japan: 50.0,mideast: 52.5 },
+  "industrial-production":{ us: 1.0, europe: -0.5,china: 5.5,  em: 3.0,  japan: 0.5, mideast: 4.0 },
+  "trade-balance":        { us: -2.8,europe: 2.5, china: 3.0,  em: -0.8, japan: 0.2, mideast: 10.0},
+  "business-confidence":  { us: 101, europe: 98,  china: 100,  em: 101,  japan: 99,  mideast: 103 },
+  // Labor & Consumption
+  "unemployment":         { us: 3.8, europe: 6.2, china: 5.0,  em: 7.2,  japan: 2.5, mideast: 9.0 },
+  "consumer-confidence":  { us: 102, europe: 97,  china: 98,   em: 101,  japan: 99,  mideast: 95  },
+  "retail-sales":         { us: 3.5, europe: 2.0, china: 5.0,  em: 5.0,  japan: 2.5, mideast: 4.0 },
+  // Financial Market
+  "stock-market":         { us: -2.0,europe: -3.0,china: -5.0, em: -3.5, japan: -1.5,mideast: -4.0},
+  "exchange-rate":        { us: 0,   europe: -1.0,china: -1.5, em: -3.0, japan: -3.0,mideast: -0.5},
+  "foreign-reserves":     { us: 0.5, europe: 0.2, china: -0.5, em: -1.0, japan: 0.0, mideast: 0.5 },
+  "current-account":      { us: -3.0,europe: 2.5, china: 2.0,  em: -1.5, japan: 3.8, mideast: 7.0 },
+};
+
+// =============================================================================
+// Per-indicator monthly volatility
+// =============================================================================
+
+const VOLATILITY: Record<string, number> = {
+  "cpi": 0.15,
+  "energy-price": 5.0,
+  "food-price": 2.0,
+  "wage-growth": 0.1,
+  "credit-growth": 0.3,
+  "house-price": 0.4,
+  "bond-yield-10y": 0.15,
+  "govt-debt-gdp": 0.5,
+  "policy-rate": 0.1,
+  "gdp-growth": 0.2,
+  "pmi-manufacturing": 1.0,
+  "industrial-production": 0.5,
+  "trade-balance": 0.2,
+  "business-confidence": 1.0,
+  "unemployment": 0.1,
+  "consumer-confidence": 1.5,
+  "retail-sales": 0.3,
+  "stock-market": 2.5,
+  "exchange-rate": 1.0,
+  "foreign-reserves": 0.5,
+  "current-account": 0.2,
+};
+
+// =============================================================================
+// Narrative Arc — 4 phases of drift
+// =============================================================================
+
+// Per-indicator directional drift per month in each phase
+// Positive drift = value increases (which may mean more or less risk depending on inverted flag)
+// We design drifts so that risk-increasing indicators trend upward across phases.
+
+interface NarrativeDrift {
+  // Each indicator gets a drift that makes risk scores increase across phases
+  // For inverted indicators (GDP, PMI, etc), negative drift = higher risk
+  [indicatorId: string]: [number, number, number, number]; // [calm, building, stress, elevated]
+}
+
+const NARRATIVE_DRIFT: NarrativeDrift = {
+  // Inflation: higher values = more risk → positive drift increases risk
+  "cpi":                   [0.05,  0.12,  0.22,  0.22],
+  "energy-price":          [0.5,   2.5,   5.0,   5.5],
+  "food-price":            [0.3,   1.0,   2.0,   2.0],
+  "wage-growth":           [0.02,  0.05,  0.08,  0.08],
+  // Credit: symmetric — push away from safe center
+  "credit-growth":         [0.05,  0.2,   0.35,  0.35],
+  "house-price":           [0.05,  -0.1,  -0.35, -0.35],
+  // Bond/debt/policy: higher = more stress
+  "bond-yield-10y":        [0.02,  0.06,  0.10,  0.10],
+  "govt-debt-gdp":         [0.3,   0.6,   1.0,   1.0],
+  "policy-rate":           [0.0,   0.02,  -0.03, -0.03],
+  // Macro: inverted — negative drift = higher risk
+  "gdp-growth":            [-0.04, -0.10, -0.18, -0.18],
+  "pmi-manufacturing":     [-0.15, -0.40, -0.70, -0.70],
+  "industrial-production": [-0.08, -0.20, -0.40, -0.40],
+  "trade-balance":         [-0.02, -0.05, -0.10, -0.10],
+  "business-confidence":   [-0.2,  -0.5,  -0.9,  -0.9],
+  // Labor: unemployment up (more risk), confidence/sales down (inverted = more risk)
+  "unemployment":          [0.02,  0.06,  0.12,  0.12],
+  "consumer-confidence":   [-0.2,  -0.5,  -0.9,  -0.9],
+  "retail-sales":          [-0.04, -0.12, -0.22, -0.22],
+  // Financial market: inverted — negative drift = higher risk
+  "stock-market":          [-0.2,  -0.6,  -1.2,  -1.2],
+  "exchange-rate":         [-0.05, -0.2,  -0.4,  -0.4],
+  "foreign-reserves":      [-0.02, -0.10, -0.20, -0.20],
+  "current-account":       [-0.02, -0.05, -0.10, -0.10],
+};
+
+function getPhase(month: number): number {
+  if (month < 6) return 0;   // Calm: Apr-Sep 2024
+  if (month < 12) return 1;  // Building: Oct 2024 - Mar 2025
+  if (month < 18) return 2;  // Stress: Apr-Sep 2025
+  return 3;                  // Elevated: Oct 2025 - Mar 2026
+}
+
+// =============================================================================
+// Correlated Shocks
+// =============================================================================
+
+interface Shock {
+  month: number;
+  name: string;
+  // Per-indicator impact (additive, applied on top of walk)
+  impacts: Record<string, number>;
+  // Per-region weight (0-1, how much of the shock each region absorbs)
+  regionWeights: Record<string, number>;
+}
+
+const SHOCKS: Shock[] = [
+  {
+    month: 8, // Dec 2024
+    name: "China property stress",
+    impacts: {
+      "house-price": -5.0,
+      "stock-market": -7.0,
+      "credit-growth": 3.0,
+      "consumer-confidence": -5.0,
+      "gdp-growth": -0.6,
+      "business-confidence": -3.0,
+    },
+    regionWeights: { us: 0.3, europe: 0.3, china: 1.0, em: 0.6, japan: 0.4, mideast: 0.2 },
+  },
+  {
+    month: 14, // Jun 2025
+    name: "Oil supply shock",
+    impacts: {
+      "energy-price": 35.0,
+      "cpi": 0.8,
+      "gdp-growth": -0.6,
+      "industrial-production": -2.0,
+      "business-confidence": -4.0,
+      "stock-market": -5.0,
+      "food-price": 5.0,
+    },
+    regionWeights: { us: 0.7, europe: 1.0, china: 0.5, em: 0.8, japan: 0.9, mideast: 0.3 },
+  },
+  {
+    month: 18, // Oct 2025
+    name: "AI regulation wave",
+    impacts: {
+      "stock-market": -8.0,
+      "unemployment": 0.5,
+      "consumer-confidence": -5.0,
+      "business-confidence": -3.0,
+      "retail-sales": -1.0,
+      "exchange-rate": -1.5,
+    },
+    regionWeights: { us: 1.0, europe: 0.8, china: 0.5, em: 0.4, japan: 0.6, mideast: 0.2 },
+  },
+  {
+    month: 21, // Jan 2026
+    name: "Geopolitical escalation",
+    impacts: {
+      "energy-price": 25.0,
+      "exchange-rate": -6.0,
+      "foreign-reserves": -4.0,
+      "stock-market": -8.0,
+      "cpi": 0.6,
+      "business-confidence": -5.0,
+      "consumer-confidence": -5.0,
+      "bond-yield-10y": 0.4,
+      "unemployment": 0.3,
+      "gdp-growth": -0.4,
+    },
+    regionWeights: { us: 0.5, europe: 0.8, china: 0.4, em: 0.7, japan: 0.5, mideast: 1.0 },
+  },
 ];
 
-// Timeline snapshots (12 months of history)
-const timelineSnapshots = [
-  { date: new Date("2025-04-01"), griScore: 42, griDelta: 0, regime: "Moderate", event: null },
-  { date: new Date("2025-05-01"), griScore: 45, griDelta: 3, regime: "Moderate", event: "Fed signals pause" },
-  { date: new Date("2025-06-01"), griScore: 48, griDelta: 3, regime: "Moderate", event: null },
-  { date: new Date("2025-07-01"), griScore: 44, griDelta: -4, regime: "Moderate", event: null },
-  { date: new Date("2025-08-01"), griScore: 51, griDelta: 7, regime: "Elevated Risk", event: "China property stress" },
-  { date: new Date("2025-09-01"), griScore: 55, griDelta: 4, regime: "Elevated Risk", event: null },
-  { date: new Date("2025-10-01"), griScore: 52, griDelta: -3, regime: "Elevated Risk", event: null },
-  { date: new Date("2025-11-01"), griScore: 58, griDelta: 6, regime: "Elevated Risk", event: "Oil supply shock" },
-  { date: new Date("2025-12-01"), griScore: 54, griDelta: -4, regime: "Elevated Risk", event: null },
-  { date: new Date("2026-01-01"), griScore: 59, griDelta: 5, regime: "Elevated Risk", event: "AI regulation wave" },
-  { date: new Date("2026-02-01"), griScore: 58, griDelta: -1, regime: "Elevated Risk", event: null },
-  { date: new Date("2026-03-14"), griScore: 63, griDelta: 5, regime: "Elevated Risk", event: "Geopolitical escalation" },
-];
+// Map month to event name (for snapshot event labels)
+const SHOCK_EVENTS = new Map(SHOCKS.map((s) => [s.month, s.name]));
 
-// Alerts with news
+// =============================================================================
+// Time-series Generator
+// =============================================================================
+
+interface GeneratedReading {
+  indicatorId: string;
+  regionId: string;
+  date: Date;
+  value: number;
+  score: number;
+  zScore: number;
+  trend: string;
+}
+
+function generateTimeSeries(): { readings: GeneratedReading[]; snapshots: Array<Snapshot & { date: Date; event: string | null }> } {
+  const regionIds = regions.map((r) => r.id);
+  const indicatorIds = INDICATOR_CONFIGS.map((c) => c.id);
+
+  // Current values tracker: values[indicatorId][regionId] = current value
+  const currentValues: Record<string, Record<string, number>> = {};
+  for (const indId of indicatorIds) {
+    currentValues[indId] = {};
+    for (const regId of regionIds) {
+      currentValues[indId][regId] = BASE_VALUES[indId]?.[regId] ?? 0;
+    }
+  }
+
+  const allReadings: GeneratedReading[] = [];
+  const allSnapshots: Array<Snapshot & { date: Date; event: string | null }> = [];
+  let previousSnapshot: Snapshot | null = null;
+
+  for (let month = 0; month < 24; month++) {
+    const date = new Date(2024, 3 + month, 1); // April 2024 = month 0
+    const phase = getPhase(month);
+
+    // Check for shocks this month
+    const activeShock = SHOCKS.find((s) => s.month === month);
+
+    const monthReadings: ScoredReading[] = [];
+    const monthPreviousValues: Record<string, Record<string, number>> = {};
+
+    for (const indId of indicatorIds) {
+      const cfg = INDICATOR_CONFIGS.find((c) => c.id === indId)!;
+      const volatility = VOLATILITY[indId] ?? 0.5;
+      const drift = NARRATIVE_DRIFT[indId]?.[phase] ?? 0;
+
+      for (const regId of regionIds) {
+        const prevValue = currentValues[indId][regId];
+        if (!monthPreviousValues[indId]) monthPreviousValues[indId] = {};
+        monthPreviousValues[indId][regId] = prevValue;
+
+        const baseValue = BASE_VALUES[indId]?.[regId] ?? cfg.historicalMean;
+
+        // Random walk with mean reversion
+        const meanReversion = 0.05 * (baseValue - prevValue);
+        const noise = gaussian() * volatility;
+
+        // Shock effect
+        let shockEffect = 0;
+        if (activeShock && activeShock.impacts[indId] !== undefined) {
+          const regionWeight = activeShock.regionWeights[regId] ?? 0.5;
+          shockEffect = activeShock.impacts[indId] * regionWeight;
+        }
+
+        let newValue = prevValue + drift + meanReversion + noise + shockEffect;
+
+        // Clamp to indicator bounds
+        newValue = Math.max(cfg.min, Math.min(cfg.max, newValue));
+
+        // Round to reasonable precision
+        newValue = parseFloat(newValue.toFixed(2));
+
+        currentValues[indId][regId] = newValue;
+
+        // Score using the scoring engine
+        const { score, zScore } = normalizeReading(indId, regId, newValue);
+        const trend = computeTrend(newValue, monthPreviousValues[indId][regId]);
+
+        const reading: ScoredReading = {
+          indicatorId: indId,
+          regionId: regId,
+          value: newValue,
+          score,
+          zScore,
+          trend,
+        };
+        monthReadings.push(reading);
+
+        allReadings.push({
+          ...reading,
+          date,
+        });
+      }
+    }
+
+    // Compute snapshot from this month's readings
+    const snapshot = computeSnapshot(monthReadings, driverCategoryWeights, previousSnapshot);
+    const event = SHOCK_EVENTS.get(month) ?? null;
+
+    allSnapshots.push({ ...snapshot, date, event });
+    previousSnapshot = snapshot;
+  }
+
+  return { readings: allReadings, snapshots: allSnapshots };
+}
+
+// =============================================================================
+// Alerts — same as before, placed at the end of timeline
+// =============================================================================
+
 const alertsData = [
   {
     severity: "critical",
@@ -282,7 +433,7 @@ const alertsData = [
   {
     severity: "warning",
     title: "European Macro Deterioration",
-    description: "Europe PMI Manufacturing at 45.2, deepest contraction in 14 months. Industrial production falling across major economies.",
+    description: "Europe PMI Manufacturing falling, deepest contraction in 14 months. Industrial production falling across major economies.",
     drivers: ["Geopolitical Conflict", "Energy Supply Shock"],
     news: [
       { title: "Eurozone factory output falls for 14th consecutive month", source: "ECB", url: "https://ecb.europa.eu", publishedAt: new Date("2026-03-13T10:00:00Z") },
@@ -303,7 +454,7 @@ const alertsData = [
   {
     severity: "info",
     title: "Middle East Financial Market Stress",
-    description: "Regional stock market drawdown at -18.5%, highest in 18 months. Capital outflows intensifying.",
+    description: "Regional stock market drawdown elevated, capital outflows intensifying.",
     drivers: ["Geopolitical Conflict", "Financial Risks"],
     news: [
       { title: "Gulf state equity markets tumble as regional tensions escalate", source: "Al Jazeera", url: "https://aljazeera.com", publishedAt: new Date("2026-03-12T15:00:00Z") },
@@ -312,31 +463,50 @@ const alertsData = [
   },
 ];
 
-async function main() {
-  console.log("Seeding GRI database...\n");
+// =============================================================================
+// Main seed function
+// =============================================================================
 
-  // 1. Reference data
-  console.log("  Creating drivers...");
+async function main() {
+  console.log("Seeding GRI database with 24-month historical data...\n");
+
+  // Generate all time-series data
+  console.log("  Generating 24-month time series...");
+  const { readings, snapshots } = generateTimeSeries();
+  console.log(`  Generated ${readings.length} readings, ${snapshots.length} snapshots`);
+
+  // Log GRI trajectory
+  console.log("\n  GRI trajectory:");
+  for (const s of snapshots) {
+    const dateStr = s.date.toISOString().slice(0, 7);
+    const eventStr = s.event ? ` ← ${s.event}` : "";
+    console.log(`    ${dateStr}: GRI=${s.griScore} (${s.regime})${eventStr}`);
+  }
+
+  // 1. Delete existing time-series data (order matters: children → parents)
+  console.log("\n  Cleaning existing time-series data...");
+  await prisma.snapshotRegionScore.deleteMany();
+  await prisma.snapshotCategoryScore.deleteMany();
+  await prisma.snapshotDriverScore.deleteMany();
+  await prisma.snapshot.deleteMany();
+  await prisma.reading.deleteMany();
+  await prisma.alertNews.deleteMany();
+  await prisma.alert.deleteMany();
+
+  // 2. Upsert reference data
+  console.log("  Upserting reference data...");
   for (const d of drivers) {
     await prisma.driver.upsert({ where: { id: d.id }, update: d, create: d });
   }
-
-  console.log("  Creating risk categories...");
   for (const c of riskCategories) {
     await prisma.riskCategory.upsert({ where: { id: c.id }, update: c, create: c });
   }
-
-  console.log("  Creating regions...");
   for (const r of regions) {
     await prisma.region.upsert({ where: { id: r.id }, update: r, create: r });
   }
-
-  console.log("  Creating indicators...");
-  for (const ind of indicators) {
+  for (const ind of indicatorDefs) {
     await prisma.indicator.upsert({ where: { id: ind.id }, update: ind, create: ind });
   }
-
-  console.log("  Creating driver-category weights...");
   for (const w of driverCategoryWeights) {
     await prisma.driverCategory.upsert({
       where: { driverId_categoryId: { driverId: w.driverId, categoryId: w.categoryId } },
@@ -345,91 +515,72 @@ async function main() {
     });
   }
 
-  // 2. Readings (mock data for today)
-  console.log("  Creating indicator readings...");
-  for (const r of mockReadings) {
-    await prisma.reading.upsert({
-      where: {
-        indicatorId_regionId_date: {
-          indicatorId: r.indicatorId,
-          regionId: r.regionId,
-          date: today,
-        },
+  // 3. Insert readings in bulk
+  console.log("  Inserting readings...");
+  const readingData = readings.map((r) => ({
+    indicatorId: r.indicatorId,
+    regionId: r.regionId,
+    date: r.date,
+    value: r.value,
+    score: r.score,
+    zScore: r.zScore,
+    trend: r.trend,
+  }));
+
+  // Batch in chunks to avoid memory issues
+  const BATCH_SIZE = 500;
+  for (let i = 0; i < readingData.length; i += BATCH_SIZE) {
+    const batch = readingData.slice(i, i + BATCH_SIZE);
+    await prisma.reading.createMany({ data: batch });
+  }
+
+  // 4. Insert snapshots sequentially (need auto-increment IDs for child records)
+  console.log("  Inserting snapshots with scores...");
+  for (const snap of snapshots) {
+    const created = await prisma.snapshot.create({
+      data: {
+        date: snap.date,
+        griScore: snap.griScore,
+        griDelta: snap.griDelta,
+        regime: snap.regime,
+        event: snap.event,
       },
-      update: { value: r.value, score: r.score, zScore: r.zScore, trend: r.trend },
-      create: { ...r, date: today },
     });
-  }
 
-  // 3. Timeline snapshots
-  console.log("  Creating timeline snapshots...");
-  for (const s of timelineSnapshots) {
-    await prisma.snapshot.upsert({
-      where: { date: s.date },
-      update: { griScore: s.griScore, griDelta: s.griDelta, regime: s.regime, event: s.event },
-      create: { date: s.date, griScore: s.griScore, griDelta: s.griDelta, regime: s.regime, event: s.event },
-    });
-  }
-
-  // 4. Snapshot scores for the latest snapshot (Mar 14)
-  console.log("  Creating snapshot scores...");
-  const latestSnap = await prisma.snapshot.findUnique({ where: { date: new Date("2026-03-14") } });
-  if (latestSnap) {
     // Driver scores
-    const driverScores = [
-      { driverId: "geopolitical", score: 72, delta: 8 },
-      { driverId: "ai-disruption", score: 65, delta: 5 },
-      { driverId: "energy-shock", score: 58, delta: 4 },
-      { driverId: "monetary", score: 55, delta: 3 },
-      { driverId: "financial-risks", score: 52, delta: 2 },
-    ];
-    for (const ds of driverScores) {
-      await prisma.snapshotDriverScore.upsert({
-        where: { snapshotId_driverId: { snapshotId: latestSnap.id, driverId: ds.driverId } },
-        update: { score: ds.score, delta: ds.delta },
-        create: { snapshotId: latestSnap.id, ...ds },
-      });
-    }
+    await prisma.snapshotDriverScore.createMany({
+      data: snap.driverScores.map((d) => ({
+        snapshotId: created.id,
+        driverId: d.driverId,
+        score: d.score,
+        delta: d.delta,
+      })),
+    });
 
     // Category scores
-    const categoryScores = [
-      { categoryId: "inflation", score: 66, delta: 6 },
-      { categoryId: "credit-liquidity", score: 61, delta: 5 },
-      { categoryId: "macro-slowdown", score: 58, delta: 4 },
-      { categoryId: "labor-consumption", score: 54, delta: 3 },
-      { categoryId: "financial-market", score: 62, delta: 5 },
-    ];
-    for (const cs of categoryScores) {
-      await prisma.snapshotCategoryScore.upsert({
-        where: { snapshotId_categoryId: { snapshotId: latestSnap.id, categoryId: cs.categoryId } },
-        update: { score: cs.score, delta: cs.delta },
-        create: { snapshotId: latestSnap.id, ...cs },
-      });
-    }
+    await prisma.snapshotCategoryScore.createMany({
+      data: snap.categoryScores.map((c) => ({
+        snapshotId: created.id,
+        categoryId: c.categoryId,
+        score: c.score,
+        delta: c.delta,
+      })),
+    });
 
     // Region scores
-    const regionScores = [
-      { regionId: "us", score: 58, delta: 3, topDriverId: "monetary" },
-      { regionId: "europe", score: 71, delta: 7, topDriverId: "geopolitical" },
-      { regionId: "china", score: 61, delta: 4, topDriverId: "financial-risks" },
-      { regionId: "em", score: 55, delta: 2, topDriverId: "geopolitical" },
-      { regionId: "japan", score: 45, delta: -1, topDriverId: "monetary" },
-      { regionId: "mideast", score: 76, delta: 9, topDriverId: "geopolitical" },
-    ];
-    for (const rs of regionScores) {
-      await prisma.snapshotRegionScore.upsert({
-        where: { snapshotId_regionId: { snapshotId: latestSnap.id, regionId: rs.regionId } },
-        update: { score: rs.score, delta: rs.delta, topDriverId: rs.topDriverId },
-        create: { snapshotId: latestSnap.id, ...rs },
-      });
-    }
+    await prisma.snapshotRegionScore.createMany({
+      data: snap.regionScores.map((r) => ({
+        snapshotId: created.id,
+        regionId: r.regionId,
+        score: r.score,
+        delta: r.delta,
+        topDriverId: r.topDriverId,
+      })),
+    });
   }
 
-  // 5. Alerts with news
+  // 5. Insert alerts
   console.log("  Creating alerts...");
-  // Clear existing alerts first
-  await prisma.alertNews.deleteMany();
-  await prisma.alert.deleteMany();
   for (const a of alertsData) {
     await prisma.alert.create({
       data: {
@@ -438,14 +589,13 @@ async function main() {
         description: a.description,
         probability: a.probability ?? null,
         drivers: a.drivers,
-        news: {
-          create: a.news,
-        },
+        news: { create: a.news },
       },
     });
   }
 
-  console.log("\nSeed complete!");
+  // Final counts
+  console.log("\nSeed complete! Row counts:");
   const counts = {
     drivers: await prisma.driver.count(),
     categories: await prisma.riskCategory.count(),
@@ -454,6 +604,9 @@ async function main() {
     weights: await prisma.driverCategory.count(),
     readings: await prisma.reading.count(),
     snapshots: await prisma.snapshot.count(),
+    driverScores: await prisma.snapshotDriverScore.count(),
+    categoryScores: await prisma.snapshotCategoryScore.count(),
+    regionScores: await prisma.snapshotRegionScore.count(),
     alerts: await prisma.alert.count(),
     news: await prisma.alertNews.count(),
   };

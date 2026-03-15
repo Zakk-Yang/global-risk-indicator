@@ -50,8 +50,11 @@ export default function RiskCategoryPanel({ riskCategories, indicators, regions 
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-xs font-mono text-zinc-200">{cat.score}</span>
-                <span className="text-[10px] font-mono font-medium" style={{ color: cat.delta > 0 ? "#ef4444" : "#22c55e" }}>
-                  +{cat.delta}
+                <span
+                  className="text-[10px] font-mono font-medium"
+                  style={{ color: cat.delta > 0 ? "#ef4444" : cat.delta < 0 ? "#22c55e" : "#94a3b8" }}
+                >
+                  {cat.delta > 0 ? "+" : ""}{cat.delta}
                 </span>
                 <span className="text-[10px] text-zinc-200 ml-1">{isExpanded ? "▲" : "▼"}</span>
               </div>
@@ -82,7 +85,9 @@ export default function RiskCategoryPanel({ riskCategories, indicators, regions 
                     {catIndicators.map((ind) => {
                       // Compute average score across regions
                       const regionEntries = Object.entries(ind.regions);
-                      const avgScore = Math.round(regionEntries.reduce((s, [, v]) => s + v.score, 0) / regionEntries.length);
+                      const avgScore = regionEntries.length > 0
+                        ? Math.round(regionEntries.reduce((s, [, v]) => s + v.score, 0) / regionEntries.length)
+                        : 50;
                       const indColor = getRiskColor(avgScore);
 
                       return (
