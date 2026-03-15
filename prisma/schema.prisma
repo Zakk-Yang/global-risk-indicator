@@ -1,0 +1,201 @@
+// =============================================================================
+// GRI Database Schema
+// Architecture: 5 Drivers → 5 Risk Categories ← ~20 Indicators × 6 Regions
+// Deploy with: Supabase / Neon (free PostgreSQL) + Vercel
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// Reference Tables (static config, populated via seed)
+// =============================================================================
+
+model Driver {
+  id          String @id // e.g. "geopolitical"
+  name        String // "Geopolitical Conflict"
+  color       String // "#ef4444"
+  description String
+
+  categories     DriverCategory[]
+  snapshotScores SnapshotDriverScore[]
+
+  @@map("drivers")
+}
+
+model RiskCategory {
+  id   String @id // e.g. "inflation"
+  name String // "Inflation Pressure"
+
+  indicators     Indicator[]
+  drivers        DriverCategory[]
+  snapshotScores SnapshotCategoryScore[]
+
+  @@map("risk_categories")
+}
+
+model Indicator {
+  id         String       @id // e.g. "cpi"
+  name       String // "CPI Inflation (YoY)"
+  unit       String // "%", "idx"
+  categoryId String       @map("category_id")
+  category   RiskCategory @relation(fields: [categoryId], references: [id])
+
+  readings Reading[]
+
+  @@map("indicators")
+}
+
+model Region {
+  id   String @id // e.g. "us"
+  name String // "United States"
+  code String // "US"
+
+  readings       Reading[]
+  snapshotScores SnapshotRegionScore[]
+
+  @@map("regions")
+}
+
+/// Driver-to-Category weight (the contribution matrix)
+model DriverCategory {
+  driverId   String       @map("driver_id")
+  categoryId String       @map("category_id")
+  weight     Float // 0-100 contribution score
+
+  driver   Driver       @relation(fields: [driverId], references: [id])
+  category RiskCategory @relation(fields: [categoryId], references: [id])
+
+  @@id([driverId, categoryId])
+  @@map("driver_category_weights")
+}
+
+// =============================================================================
+// Time-Series Data (grows with each data refresh)
+// =============================================================================
+
+/// Raw indicator reading per region per date — the core data table
+model Reading {
+  id          Int      @id @default(autoincrement())
+  indicatorId String   @map("indicator_id")
+  regionId    String   @map("region_id")
+  date        DateTime @db.Date
+
+  value  Float // Raw value (e.g. 3.8 for CPI)
+  score  Int // Normalized risk score 0-100
+  zScore Float   @map("z_score") // Z-score vs historical mean
+  trend  String // "rising" | "falling" | "stable"
+
+  indicator Indicator @relation(fields: [indicatorId], references: [id])
+  region    Region    @relation(fields: [regionId], references: [id])
+
+  @@unique([indicatorId, regionId, date])
+  @@index([date])
+  @@index([indicatorId, date])
+  @@index([regionId, date])
+  @@map("readings")
+}
+
+// =============================================================================
+// Computed Snapshots (one per day, derived from readings by scoring engine)
+// =============================================================================
+
+/// Daily GRI score snapshot
+model Snapshot {
+  id       Int      @id @default(autoincrement())
+  date     DateTime @unique @db.Date
+  griScore Int      @map("gri_score") // 0-100
+  griDelta Int      @map("gri_delta") // Change from previous
+  regime   String // "Low Risk" | "Moderate" | "Elevated Risk" | "High Risk" | "Critical"
+  event    String? // Optional event label for timeline
+
+  driverScores   SnapshotDriverScore[]
+  categoryScores SnapshotCategoryScore[]
+  regionScores   SnapshotRegionScore[]
+
+  @@index([date])
+  @@map("snapshots")
+}
+
+model SnapshotDriverScore {
+  id         Int @id @default(autoincrement())
+  snapshotId Int @map("snapshot_id")
+  driverId   String @map("driver_id")
+  score      Int // 0-100
+  delta      Int // Change from previous snapshot
+
+  snapshot Snapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  driver   Driver   @relation(fields: [driverId], references: [id])
+
+  @@unique([snapshotId, driverId])
+  @@map("snapshot_driver_scores")
+}
+
+model SnapshotCategoryScore {
+  id         Int @id @default(autoincrement())
+  snapshotId Int @map("snapshot_id")
+  categoryId String @map("category_id")
+  score      Int // 0-100
+  delta      Int // Change from previous snapshot
+
+  snapshot Snapshot     @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  category RiskCategory @relation(fields: [categoryId], references: [id])
+
+  @@unique([snapshotId, categoryId])
+  @@map("snapshot_category_scores")
+}
+
+model SnapshotRegionScore {
+  id          Int @id @default(autoincrement())
+  snapshotId  Int @map("snapshot_id")
+  regionId    String @map("region_id")
+  score       Int // 0-100
+  delta       Int
+  topDriverId String @map("top_driver_id")
+
+  snapshot Snapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  region   Region   @relation(fields: [regionId], references: [id])
+
+  @@unique([snapshotId, regionId])
+  @@map("snapshot_region_scores")
+}
+
+// =============================================================================
+// Alerts (event-driven, created by scoring engine or manually)
+// =============================================================================
+
+model Alert {
+  id          String   @id @default(cuid())
+  severity    String // "critical" | "warning" | "info"
+  title       String
+  description String
+  probability Int? // Correction probability (30d), optional
+  drivers     String[] // Driver names as text array
+  createdAt   DateTime @default(now()) @map("created_at")
+  active      Boolean  @default(true)
+
+  news AlertNews[]
+
+  @@index([createdAt])
+  @@index([active])
+  @@map("alerts")
+}
+
+model AlertNews {
+  id          Int      @id @default(autoincrement())
+  alertId     String   @map("alert_id")
+  title       String
+  source      String // "Reuters", "Bloomberg", etc.
+  url         String
+  publishedAt DateTime @map("published_at")
+
+  alert Alert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@map("alert_news")
+}
