@@ -91,10 +91,10 @@ export async function getRegions(): Promise<Region[]> {
     : [];
   const scoreMap = Object.fromEntries(regionScores.map((s) => [s.regionId, s]));
 
-  // Get category scores per region from latest readings
-  const latestDate = latestSnap?.date ?? new Date();
+  // Get latest reading per indicator/region (carry-forward: use most recent regardless of date)
   const readings = await prisma.reading.findMany({
-    where: { date: latestDate },
+    distinct: ["indicatorId", "regionId"],
+    orderBy: { date: "desc" },
     include: { indicator: { select: { categoryId: true } } },
   });
 
@@ -132,14 +132,14 @@ export async function getRegions(): Promise<Region[]> {
   });
 }
 
-/** Get all indicators with their latest region readings */
+/** Get all indicators with their latest region readings (carry-forward) */
 export async function getIndicators(): Promise<Indicator[]> {
   const allIndicators = await prisma.indicator.findMany();
-  const latestSnap = await prisma.snapshot.findFirst({ orderBy: { date: "desc" } });
-  const latestDate = latestSnap?.date ?? new Date();
 
+  // Carry-forward: get the most recent reading per indicator/region pair
   const readings = await prisma.reading.findMany({
-    where: { date: latestDate },
+    distinct: ["indicatorId", "regionId"],
+    orderBy: { date: "desc" },
   });
 
   // Group readings by indicator

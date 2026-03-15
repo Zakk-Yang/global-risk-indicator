@@ -35,31 +35,31 @@ const regions = [
 
 const indicators = [
   // Inflation Pressure
-  { id: "cpi", name: "CPI Inflation (YoY)", unit: "%", categoryId: "inflation" },
-  { id: "energy-price", name: "Energy Price Index", unit: "idx", categoryId: "inflation" },
-  { id: "food-price", name: "Food Price Index", unit: "idx", categoryId: "inflation" },
-  { id: "wage-growth", name: "Wage Growth (YoY)", unit: "%", categoryId: "inflation" },
+  { id: "cpi", name: "CPI Inflation (YoY)", unit: "%", categoryId: "inflation", frequency: "monthly", source: "FRED", sourceCode: "CPIAUCSL", sourceUrl: "https://fred.stlouisfed.org/series/CPIAUCSL" },
+  { id: "energy-price", name: "Energy Price Index", unit: "idx", categoryId: "inflation", frequency: "daily", source: "FRED", sourceCode: "DCOILWTICO", sourceUrl: "https://fred.stlouisfed.org/series/DCOILWTICO" },
+  { id: "food-price", name: "Food Price Index", unit: "idx", categoryId: "inflation", frequency: "monthly", source: "FAO", sourceCode: "FFPI", sourceUrl: "https://www.fao.org/worldfoodsituation/foodpricesindex" },
+  { id: "wage-growth", name: "Wage Growth (YoY)", unit: "%", categoryId: "inflation", frequency: "monthly", source: "FRED", sourceCode: "CES0500000003", sourceUrl: "https://fred.stlouisfed.org/series/CES0500000003" },
   // Credit & Liquidity Stress
-  { id: "credit-growth", name: "Credit Growth (YoY)", unit: "%", categoryId: "credit-liquidity" },
-  { id: "house-price", name: "House Price Index (YoY)", unit: "%", categoryId: "credit-liquidity" },
-  { id: "bond-yield-10y", name: "10Y Government Bond Yield", unit: "%", categoryId: "credit-liquidity" },
-  { id: "govt-debt-gdp", name: "Government Debt / GDP", unit: "%", categoryId: "credit-liquidity" },
-  { id: "policy-rate", name: "Policy Interest Rate", unit: "%", categoryId: "credit-liquidity" },
+  { id: "credit-growth", name: "Credit Growth (YoY)", unit: "%", categoryId: "credit-liquidity", frequency: "quarterly", source: "BIS", sourceCode: "TOTAL_CREDIT", sourceUrl: "https://www.bis.org/statistics/totcredit.htm" },
+  { id: "house-price", name: "House Price Index (YoY)", unit: "%", categoryId: "credit-liquidity", frequency: "quarterly", source: "BIS", sourceCode: "REAL_PROPERTY", sourceUrl: "https://www.bis.org/statistics/pp.htm" },
+  { id: "bond-yield-10y", name: "10Y Government Bond Yield", unit: "%", categoryId: "credit-liquidity", frequency: "daily", source: "FRED", sourceCode: "DGS10", sourceUrl: "https://fred.stlouisfed.org/series/DGS10" },
+  { id: "govt-debt-gdp", name: "Government Debt / GDP", unit: "%", categoryId: "credit-liquidity", frequency: "quarterly", source: "IMF", sourceCode: "GGGD_NGDP", sourceUrl: "https://www.imf.org/external/datamapper/GGGD_NGDP@WEO" },
+  { id: "policy-rate", name: "Policy Interest Rate", unit: "%", categoryId: "credit-liquidity", frequency: "monthly", source: "BIS", sourceCode: "POLICY_RATE", sourceUrl: "https://www.bis.org/statistics/cbpol.htm" },
   // Macro Slowdown
-  { id: "gdp-growth", name: "GDP Growth (YoY)", unit: "%", categoryId: "macro-slowdown" },
-  { id: "pmi-manufacturing", name: "PMI Manufacturing", unit: "idx", categoryId: "macro-slowdown" },
-  { id: "industrial-production", name: "Industrial Production (YoY)", unit: "%", categoryId: "macro-slowdown" },
-  { id: "trade-balance", name: "Trade Balance (% GDP)", unit: "%", categoryId: "macro-slowdown" },
-  { id: "business-confidence", name: "Business Confidence Index", unit: "idx", categoryId: "macro-slowdown" },
+  { id: "gdp-growth", name: "GDP Growth (YoY)", unit: "%", categoryId: "macro-slowdown", frequency: "quarterly", source: "OECD", sourceCode: "QNA_GDP", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=QNA" },
+  { id: "pmi-manufacturing", name: "PMI Manufacturing", unit: "idx", categoryId: "macro-slowdown", frequency: "monthly", source: "S&P Global", sourceCode: "PMI_MFG", sourceUrl: "https://www.pmi.spglobal.com" },
+  { id: "industrial-production", name: "Industrial Production (YoY)", unit: "%", categoryId: "macro-slowdown", frequency: "monthly", source: "FRED", sourceCode: "INDPRO", sourceUrl: "https://fred.stlouisfed.org/series/INDPRO" },
+  { id: "trade-balance", name: "Trade Balance (% GDP)", unit: "%", categoryId: "macro-slowdown", frequency: "quarterly", source: "OECD", sourceCode: "TRADE_BAL", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=MEI_TRD" },
+  { id: "business-confidence", name: "Business Confidence Index", unit: "idx", categoryId: "macro-slowdown", frequency: "monthly", source: "OECD", sourceCode: "BCI", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=MEI_CLI" },
   // Labor & Consumption Stress
-  { id: "unemployment", name: "Unemployment Rate", unit: "%", categoryId: "labor-consumption" },
-  { id: "consumer-confidence", name: "Consumer Confidence Index", unit: "idx", categoryId: "labor-consumption" },
-  { id: "retail-sales", name: "Retail Sales (YoY)", unit: "%", categoryId: "labor-consumption" },
+  { id: "unemployment", name: "Unemployment Rate", unit: "%", categoryId: "labor-consumption", frequency: "monthly", source: "FRED", sourceCode: "UNRATE", sourceUrl: "https://fred.stlouisfed.org/series/UNRATE" },
+  { id: "consumer-confidence", name: "Consumer Confidence Index", unit: "idx", categoryId: "labor-consumption", frequency: "monthly", source: "OECD", sourceCode: "CCI", sourceUrl: "https://stats.oecd.org/Index.aspx?DataSetCode=MEI_CLI" },
+  { id: "retail-sales", name: "Retail Sales (YoY)", unit: "%", categoryId: "labor-consumption", frequency: "monthly", source: "FRED", sourceCode: "RSXFS", sourceUrl: "https://fred.stlouisfed.org/series/RSXFS" },
   // Financial Market Stress
-  { id: "stock-market", name: "Stock Market Drawdown", unit: "%", categoryId: "financial-market" },
-  { id: "exchange-rate", name: "Exchange Rate vs USD (YoY)", unit: "%", categoryId: "financial-market" },
-  { id: "foreign-reserves", name: "Foreign Reserves (3m change)", unit: "%", categoryId: "financial-market" },
-  { id: "current-account", name: "Current Account (% GDP)", unit: "%", categoryId: "financial-market" },
+  { id: "stock-market", name: "Stock Market Drawdown", unit: "%", categoryId: "financial-market", frequency: "daily", source: "Yahoo Finance", sourceCode: "^GSPC", sourceUrl: "https://finance.yahoo.com/quote/%5EGSPC" },
+  { id: "exchange-rate", name: "Exchange Rate vs USD (YoY)", unit: "%", categoryId: "financial-market", frequency: "daily", source: "FRED", sourceCode: "DTWEXBGS", sourceUrl: "https://fred.stlouisfed.org/series/DTWEXBGS" },
+  { id: "foreign-reserves", name: "Foreign Reserves (3m change)", unit: "%", categoryId: "financial-market", frequency: "monthly", source: "IMF", sourceCode: "COFER", sourceUrl: "https://data.imf.org/?sk=E6A5F467-C14B-4AA8-9F6D-5A09EC4E62A4" },
+  { id: "current-account", name: "Current Account (% GDP)", unit: "%", categoryId: "financial-market", frequency: "quarterly", source: "IMF", sourceCode: "BCA_NGDPD", sourceUrl: "https://www.imf.org/external/datamapper/BCA_NGDPD@WEO" },
 ];
 
 // Driver → Category contribution weights (from categoryMatrix)
